@@ -5,7 +5,8 @@ use hyper::{
     Response,
     Server,
     Method,
-    service::{make_service_fn, service_fn}
+    service::{make_service_fn, service_fn},
+    StatusCode,
 };
 
 use tera::{Context, Tera};
@@ -16,6 +17,7 @@ use uuid::Uuid;
 use rusqlite::{
     params,
     Connection,
+    OptionalExtension,
 };
 
 use tokio::sync::Mutex;
@@ -26,6 +28,54 @@ use std::{
     str,
     sync::Arc,
 };
+
+struct Post {
+    id: Uuid,
+    title: String,
+    content: String,
+}
+
+impl Post {
+    fn render(&self, tera: Arc<Tera>) -> String {
+        let mut ctx = Context::new();
+        ctx.insert("id", self.id.as_bytes());
+        ctx.insert("title", self.title.as_bytes());
+        ctx.insert("content", self.content.as_bytes());
+
+        tera.render("post", &ctx).unwrap()
+    }
+}
+
+fn get_id(req: &Request<Body>) -> Uuid {
+    // &strをuuidにparseできんが
+    todo!()
+}
+
+async fn find_post(
+    req: Request<Body>,
+    tera: Arc<Tera>,
+    conn: Arc<Mutex<Connection>>
+) -> Result<Response<Body>, Error> {
+    let id = req.uri().path().split('/').collect::<Vec<&str>>()[2];
+    println!("{}", id);
+
+    let post = conn.lock().await.query_row(
+        "SELECT id, title, content FROM posts WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Post {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                content: row.get(2)?,
+            })
+        },
+    ).optional().unwrap();
+
+    match post {
+        Some(post) => Ok(Response::new(post.render(tera).into())),
+        None => Ok(Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap()),
+    }
+}
 
 static TEMPLATE: &str = "Hello, {{ name }}!\n";
 
@@ -76,10 +126,17 @@ async fn create_post(
 //     handle(req).await.map_err(|e| match e {})
 // }
 
-async fn route(req: Request<Body>, tera: Arc<Tera>) -> Result<Response<Body>, Error> {
-    match *req.method() {
-        Method::POST => handle_with_body(req, tera).await,
-        _ => handle(req).await.map_err(|e| match e {}),
+async fn route(
+    req: Request<Body>,
+    tera: Arc<Tera>,
+    conn: Arc<Mutex<Connection>>
+) -> Result<Response<Body>, Error> {
+    match (req.uri().path(), req.method().as_str()) {
+        ("/", "GET") => handle_with_body(req, tera).await,
+        ("/posts", "POST") => create_post(req, tera, conn).await,
+        (path, "GET") if path.starts_with("/posts/") => find_post(req, tera, conn).await,
+        ("/", _) => handle(req).await.map_err(|e| match e {}),
+        _ => Ok(Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap()),
     }
 }
 
@@ -88,14 +145,24 @@ async fn main() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 
     let mut tera = Tera::default();
-    tera.add_raw_template("hello", TEMPLATE).unwrap();
+    // tera.add_raw_template("hello", TEMPLATE).unwrap();
+    tera.add_raw_template("post", "id: {{id}}\ntitle: {{title}}\ncontent: {{content}}").unwrap();
     let tera = Arc::new(tera);
+
+    let conn = Connection::open_in_memory().unwrap();
+    let conn = Arc::new(Mutex::new(conn));
+
+    conn.lock().await.execute(
+        "CREATE TABLE posts (id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL)",
+        [],
+    ).unwrap();
 
     let make_svc = make_service_fn(|_conn| {
         let tera = tera.clone();
+        let conn = conn.clone();
         async {
             Ok::<_, Infallible>(service_fn(move |req| {
-                route(req, tera.clone())
+                route(req, tera.clone(), conn.clone())
             }))
         }
     });
