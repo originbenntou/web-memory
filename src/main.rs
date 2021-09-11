@@ -38,17 +38,18 @@ struct Post {
 impl Post {
     fn render(&self, tera: Arc<Tera>) -> String {
         let mut ctx = Context::new();
-        ctx.insert("id", self.id.as_bytes());
-        ctx.insert("title", self.title.as_bytes());
-        ctx.insert("content", self.content.as_bytes());
+        ctx.insert("id", self.id.to_string().as_str());
+        ctx.insert("title", self.title.as_str());
+        ctx.insert("content", self.content.as_str());
 
         tera.render("post", &ctx).unwrap()
     }
 }
 
 fn get_id(req: &Request<Body>) -> Uuid {
-    // &strをuuidにparseできんが
-    todo!()
+    let path = req.uri().path().trim().replace("/posts/", "");
+    // FIXME: cloneしない方法
+    Uuid::parse_str(path.clone().as_str()).unwrap()
 }
 
 async fn find_post(
@@ -56,8 +57,7 @@ async fn find_post(
     tera: Arc<Tera>,
     conn: Arc<Mutex<Connection>>
 ) -> Result<Response<Body>, Error> {
-    let id = req.uri().path().split('/').collect::<Vec<&str>>()[2];
-    println!("{}", id);
+    let id = get_id(&req);
 
     let post = conn.lock().await.query_row(
         "SELECT id, title, content FROM posts WHERE id = ?1",
@@ -153,7 +153,7 @@ async fn main() {
     let conn = Arc::new(Mutex::new(conn));
 
     conn.lock().await.execute(
-        "CREATE TABLE posts (id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL)",
+        "CREATE TABLE posts (id BLOB PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL)",
         [],
     ).unwrap();
 
